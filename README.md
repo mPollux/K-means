@@ -1,4 +1,4 @@
-# K-means 1D com OpenMP – Etapa 1 (Paralelização em CPU)
+# K-means 1D com OpenMP – (Paralelização em CPU)
 
 Este projeto implementa e avalia a paralelização do algoritmo **K-means 1D** utilizando **OpenMP**. Foram comparadas as versões sequencial e paralela com diferentes números de threads, políticas de escalonamento (*static* e *dynamic*) e tamanhos de *chunk*, com foco em desempenho (tempo, speedup, throughput) e corretude (SSE e resultados finais dos clusters).
 
