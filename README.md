@@ -145,9 +145,9 @@ O script `run_bench.sh` aceita parâmetros:
 * Cria nomes de CSV como:
 
 ```
-resultados_omp_20250204_183355.csv
-resultados_cuda_20250204_183501.csv
-resultados_omp_cuda_20250204_183622.csv
+resultados_omp_YYYYMMDD_HHMMSS.csv
+resultados_cuda_YYYYMMDD_HHMMSS.csv
+resultados_omp_cuda_YYYYMMDD_HHMMSS.csv
 ```
 
 ---
