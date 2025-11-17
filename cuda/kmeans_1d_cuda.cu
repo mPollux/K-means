@@ -1,6 +1,8 @@
 /* kmeans_1d_cuda.cu
-   Etapa 1 — CUDA
-   - mover o assignment para a GPU; update feito no host (CPU)
+   Etapa 2 — CUDA
+   - over o assignment para a GPU (usando memória cste para C)
+   - redução do SSE na GPU
+   - update no host (CPU)
 */
 
 #include <cstdio>
@@ -11,6 +13,12 @@
 #include <string>
 #include <chrono>
 #include <cuda_runtime.h>
+
+/* memória cste p o número de centróides (K), necessário p a redução */
+__constant__ int K_const;
+
+/* memória cste p os centróides (C) */
+__constant__ double C_const[1024];
 
 /* ---------- util CSV 1D: cada linha tem 1 número ---------- */
 static int count_rows(const char *path){
@@ -76,12 +84,7 @@ static void write_centroids_csv(const char *path, const double *C, int K){
 
 /* ---------- k-means 1D ---------- */
 /* assignment: cada thread i varre todos os K centróides, escolhe o melhor, grava assign[i] e sse_per_point[i] */
-__global__ void assignment_step_1d_kernel(const double* __restrict__ X,
-                                  const double* __restrict__ C,
-                                  int* __restrict__ assign,
-                                  double* __restrict__ sse_per_point,
-                                  int N, int K)
-{
+__global__ void assignment_step_1d_kernel(const double* __restrict__ X, int* __restrict__ assign, double* __restrict__ sse_per_point, int N, int K) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= N) return;
 
@@ -90,8 +93,8 @@ __global__ void assignment_step_1d_kernel(const double* __restrict__ X,
     double bestd = 1.0e300;
 
     /* varre K centróides */
-    for(int c=0;c<K;c++){
-        double diff = xi - C[c];
+    for(int c = 0; c < K; c++){
+        double diff = xi - C_const[c];
         double d = diff * diff;
         if(d < bestd){ bestd = d; best = c; }
     }
@@ -99,99 +102,130 @@ __global__ void assignment_step_1d_kernel(const double* __restrict__ X,
     sse_per_point[i] = bestd;
 }
 
+/* kernel de redução por bloco para somar o SSE na GPU */
+__global__ void reduce_kernel(const double* __restrict__ input, double* __restrict__ output, int N) {
+
+    __shared__ double sdata[1024]; /* assumindo blockDim.x <= 1024 */
+
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    sdata[tid] = (i < N) ? input[i] : 0.0;
+    __syncthreads();
+
+    for (unsigned int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] += sdata[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        output[blockIdx.x] = sdata[0];
+    }
+}
+
 /* host: update e outer loop */
-static void update_step_1d_host(const double *X, double *C, const int *assign, int N, int K){
+static void update_step_1d_host(const double *X, double *C, const int *assign, int N, int K) {
     std::vector<double> sum(K, 0.0);
     std::vector<int> cnt(K, 0);
 
-    for(int i=0;i<N;i++){
+    for(int i = 0; i < N; i++){
         int a = assign[i];
         cnt[a] += 1;
         sum[a] += X[i];
     }
-    for(int c=0;c<K;c++){
-        if(cnt[c] > 0) C[c] = sum[c] / (double)cnt[c];
-        else           C[c] = X[0]; /* fallback simples para cluster vazio */
+    for(int c = 0; c < K; c++){
+        if(cnt[c] > 0) {
+            C[c] = sum[c] / (double)cnt[c];
+        } else {
+            C[c] = X[0]; /* fallback simples para cluster vazio */
+        }
     }
 }
 
-static void kmeans_1d_cuda(const double *X_h, double *C_h, int *assign_h,
-                           int N, int K, int max_iter, double eps,
-                           int block_size,
-                           int *iters_out, double *sse_out,
-                           float *ms_h2d, float *ms_kernel, float *ms_d2h, double *ms_total)
-{
+static void kmeans_1d_cuda(const double *X_h, double *C_h, int *assign_h, int N, int K, int max_iter, double eps, int block_size, int *iters_out, double *sse_out, float *ms_h2d, float *ms_kernel, float *ms_d2h, double *ms_total) {
     using clock = std::chrono::high_resolution_clock;
     auto t0 = clock::now();
 
     /* alocações no device */
-    double *X_d=nullptr, *C_d=nullptr, *sse_d=nullptr;
-    int *assign_d=nullptr;
+    double *X_d = nullptr, *sse_d = nullptr, *sse_block_d = nullptr;
+    int *assign_d = nullptr;
 
     cudaEvent_t eH2D_start, eH2D_stop, eK_start, eK_stop, eD2H_start, eD2H_stop;
     cudaEventCreate(&eH2D_start); cudaEventCreate(&eH2D_stop);
     cudaEventCreate(&eK_start);   cudaEventCreate(&eK_stop);
     cudaEventCreate(&eD2H_start); cudaEventCreate(&eD2H_stop);
 
+    /* cópia inicial de K p a memória cste */
+    cudaMemcpyToSymbol(K_const, &K, sizeof(int));
+
     cudaMalloc(&X_d,    (size_t)N * sizeof(double));
-    cudaMalloc(&C_d,    (size_t)K * sizeof(double));
     cudaMalloc(&assign_d,(size_t)N * sizeof(int));
     cudaMalloc(&sse_d,  (size_t)N * sizeof(double));
+    
+    int grid = (N + block_size - 1) / block_size;
+    int num_blocks_sse = grid; /* o núm de blocos é o tamanho do array de saída da primeira redução */
+    cudaMalloc(&sse_block_d, (size_t)num_blocks_sse * sizeof(double));
 
-    /* copia X e C pra GPU */
+    /* copia X pra GPU */
     cudaEventRecord(eH2D_start);
     cudaMemcpy(X_d, X_h, (size_t)N * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(C_d, C_h, (size_t)K * sizeof(double), cudaMemcpyHostToDevice);
+    /* cópia inicial de C para a memória cste */
+    cudaMemcpyToSymbol(C_const, C_h, (size_t)K * sizeof(double));
+
     cudaEventRecord(eH2D_stop);
     cudaEventSynchronize(eH2D_stop);
     cudaEventElapsedTime(ms_h2d, eH2D_start, eH2D_stop);
-
-    int grid = (N + block_size - 1) / block_size;
 
     double prev_sse = 1.0e300;
     double sse = 0.0;
     int it = 0;
 
-    std::vector<double> sse_host(N);
+    /* vetor p armazenar o resultado da redução */
+    std::vector<double> sse_block_h(num_blocks_sse);
 
-    for(it=0; it<max_iter; ++it){
+    for(it = 0; it < max_iter; it++) {
         /* assignment no kernel */
         cudaEventRecord(eK_start);
-        assignment_step_1d_kernel<<<grid, block_size>>>(X_d, C_d, assign_d, sse_d, N, K);
+        assignment_step_1d_kernel<<<grid, block_size>>>(X_d, assign_d, sse_d, N, K);
+        
+        /* redução do SSE na GPU */
+        reduce_kernel<<<num_blocks_sse, block_size>>>(sse_d, sse_block_d, N);
         cudaEventRecord(eK_stop);
         cudaEventSynchronize(eK_stop);
         float this_kernel_ms = 0.0f;
         cudaEventElapsedTime(&this_kernel_ms, eK_start, eK_stop);
         *ms_kernel += this_kernel_ms;
 
-        /* copia os resultados do assignment pro host (assign + sse por ponto) */
+        /* copia os resultados pro host (assign + sse por ponto) */
         cudaEventRecord(eD2H_start);
         cudaMemcpy(assign_h, assign_d, (size_t)N * sizeof(int), cudaMemcpyDeviceToHost);
-        cudaMemcpy(sse_host.data(), sse_d, (size_t)N * sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(sse_block_h.data(), sse_block_d, (size_t)num_blocks_sse * sizeof(double), cudaMemcpyDeviceToHost);
         cudaEventRecord(eD2H_stop);
         cudaEventSynchronize(eD2H_stop);
         float this_d2h_ms = 0.0f;
         cudaEventElapsedTime(&this_d2h_ms, eD2H_start, eD2H_stop);
         *ms_d2h += this_d2h_ms;
 
-        /* soma SSE no host */
+        /* soma SSE final no host */
         sse = 0.0;
-        for(int i=0;i<N;i++) sse += sse_host[i];
+        for(int i=0;i<num_blocks_sse;i++) sse += sse_block_h[i];
 
         /* usa variação relativa da SSE no critério de parada */
         double rel = fabs(sse - prev_sse) / (prev_sse > 0.0 ? prev_sse : 1.0);
         if(rel < eps){ it++; break; }
 
-        /*  ppdate no host */
+        /* update no host */
         update_step_1d_host(X_h, C_h, assign_h, N, K);
 
-        /* copia C atualizado pra GPU, pra próxima iteração */
-        cudaMemcpy(C_d, C_h, (size_t)K * sizeof(double), cudaMemcpyHostToDevice);
+        /* copia C atualizado pra memória cste, pra próxima iteração */
+        cudaMemcpyToSymbol(C_const, C_h, (size_t)K * sizeof(double));
 
         prev_sse = sse;
     }
 
-    cudaFree(X_d); cudaFree(C_d); cudaFree(assign_d); cudaFree(sse_d);
+    cudaFree(X_d); cudaFree(assign_d); cudaFree(sse_d); cudaFree(sse_block_d);
 
     auto t1 = clock::now();
     *ms_total = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -230,13 +264,19 @@ int main(int argc, char **argv){
     double *C = read_csv_1col(pathC, &K);
     int *assign = (int*)malloc((size_t)N * sizeof(int));
     if(!assign){ fprintf(stderr,"Sem memoria para assign\n"); free(X); free(C); return 1; }
+    
+    /* verificação de segurança para a memória cste */
+    if (K > 1024) {
+        fprintf(stderr, "Erro: K=%d excede o limite de 1024 centróides para a memória constante.\n", K);
+        free(assign); free(X); free(C);
+        return 1;
+    }
 
     int iters=0; double sse=0.0;
     float ms_h2d=0.0f, ms_kernel=0.0f, ms_d2h=0.0f;
     double ms_total=0.0;
 
-    kmeans_1d_cuda(X, C, assign, N, K, max_iter, eps, block_sz,
-                   &iters, &sse, &ms_h2d, &ms_kernel, &ms_d2h, &ms_total);
+    kmeans_1d_cuda(X, C, assign, N, K, max_iter, eps, block_sz, &iters, &sse, &ms_h2d, &ms_kernel, &ms_d2h, &ms_total);
 
     printf("K-means 1D (CUDA)\n");
     printf("N=%d K=%d max_iter=%d eps=%g block=%d\n", N, K, max_iter, eps, block_sz);
