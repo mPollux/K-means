@@ -21,7 +21,7 @@ O objetivo é **avaliar o impacto da paralelização** no tempo de execução, t
 │   ├── dados_g.csv
 │   ├── centroides_iniciais_p.csv
 │   ├── centroides_iniciais_m.csv
-│   ├── centroides_iniciais_g.csv
+│   └── centroides_iniciais_g.csv
 │
 ├── serial/
 │   └── kmeans_1d_naive.c
@@ -36,7 +36,8 @@ O objetivo é **avaliar o impacto da paralelização** no tempo de execução, t
 ├── analisar_bench.py          # Consolidação + gráficos + validação
 ├── figs_bench/                # Gerado automaticamente
 │   ├── openmp/
-│   └── cuda/
+│   ├── cuda/
+│   └── global/    
 └── README.md
 ```
 
