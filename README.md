@@ -154,33 +154,71 @@ resultados_omp_cuda_YYYYMMDD_HHMMSS.csv
 
 ## 3️⃣ Gerar gráficos e tabelas com Python
 
-```bash
-python3 analisar_bench.py resultados_selecionado.csv
+O script `analisar_bench.py` recebe dois parâmetros:
+
+```
+python3 analisar_bench.py <arquivo_csv> <modo>
 ```
 
-Ele gera automaticamente:
+### 🔸 Processar **somente resultados CUDA**
+
+```
+python3 analisar_bench.py resultados_cuda.csv cuda
+```
+
+### 🔸 Processar **somente resultados OpenMP**
+
+```
+python3 analisar_bench.py resultados_omp.csv omp
+```
+
+### 🔸 Processar **todas as versões juntas (Serial + OpenMP + CUDA)**
+
+```
+python3 analisar_bench.py resultados_omp_cuda.csv all
+```
+
+O script identifica automaticamente os modos presentes (Serial, OpenMP, CUDA) e gera a seguinte estrutura:
 
 ```
 figs_bench/
 ├── openmp/
-│   ├── tempo_vs_threads.png
-│   ├── speedup_vs_threads.png
-│   ├── pps_vs_threads.png
-│   └── sched_chunk_T8.png
-└── cuda/
-    ├── tempos_cuda.png
-    ├── throughput_cuda.png
-    ├── speedup_vs_cpu.png
-    └── comparativo_cuda_vs_omp.png
+│   ├── p_omp_*.png
+│   ├── m_omp_*.png
+│   └── g_omp_*.png
+├── cuda/
+│   ├── p_cuda_*.png
+│   ├── m_cuda_*.png
+│   └── g_cuda_*.png
+└── global/
+    └── comparacao_seq_omp_cuda.csv
 ```
 
-Além de:
+A pasta **openmp/** contém gráficos de:
 
-* `validacao_sse.txt` — confirma corretude entre versões
-* Tabela CSV de melhores configurações
-* Curvas de tempo e speedup por scheduler
+* tempo × threads
+* throughput × threads
+* speedup vs. sequência
+* efeitos de scheduler e chunk
+
+A pasta **cuda/** contém gráficos de:
+
+* tempo × block size
+* throughput × block size
+* speedup vs. serial e vs. OpenMP
+
+A pasta **global/** contém:
+
+* **`comparacao_seq_omp_cuda.csv`** — tabela consolidada comparando Serial × OpenMP × CUDA
+  (usada para gerar tabelas de avaliação no relatório)
+
+Além disso, o script também gera:
+
+* **`validacao_sse.txt`** — confirma corretude entre todas as versões
+* Relatório no terminal com as melhores configurações encontradas por modo
 
 ---
+
 
 # 📊 Resultados analisados
 
