@@ -3,13 +3,13 @@
 """
 Analisa o CSV gerado pelo run_bench.sh e produz gráficos/tabelas comparando:
 
-MODO openmp:
+MODO --openmp:
 - Comparação de desempenho seq x OpenMP
 - Gráficos: Tempo vs Threads, Speedup vs Threads, Pontos/s vs Threads
 - Comparação de schedule e chunk
 - Validação de SSE entre seq e omp
 
-MODO cuda:
+MODO --cuda:
 - Comparação de desempenho seq x CUDA
 - Gráficos por dataset:
     * Tempos H2D, Kernel, D2H, Total vs block
@@ -17,18 +17,28 @@ MODO cuda:
     * Speedup vs block (usando sequencial como baseline)
 - Tabela consolidada com métricas CUDA
 
-MODO all:
-- Faz tudo de openmp + cuda
-- Gera ainda um CSV consolidado comparando:
-    * seq, melhor configuração OpenMP e CUDA
-    * throughput (pontos/s)
-    * speedup vs serial
-    * speedup vs melhor OpenMP (para CUDA)
+MODO --mpi:
+- Comparação de desempenho seq x MPI (strong scaling em nº de processos)
+- Gráficos por dataset:
+    * Tempo total vs processos
+    * Speedup vs processos (vs sequencial)
+    * Tempo total, tempo de comunicação (Allreduce) e computação vs processos
+- Tabela consolidada com métricas MPI
+
+MODO --all:
+- Faz tudo: openmp + cuda + mpi
+- Gera ainda um CSV global comparando:
+    * seq
+    * melhor configuração OpenMP
+    * todas as configs CUDA
+    * melhor configuração MPI
+  com throughput e speedups (vs seq e vs melhor OMP).
 
 Uso:
-    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv openmp
-    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv cuda
-    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv all
+    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv --openmp
+    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv --cuda
+    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv --mpi
+    python3 analisar_bench.py resultados_YYYYMMDD_HHMMSS.csv --all
 
 Requisitos:
     pip install -r requirements.txt
@@ -51,6 +61,8 @@ DATASET_N = {"p": 10_000, "m": 100_000, "g": 1_000_000}
 THREADS_FIXED_PREFERRED = 8
 TOL_SSE = 1e-9  # tolerância para comparar SSEs
 
+
+# ===================== CARGA E BASELINES =====================
 
 def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -104,7 +116,6 @@ def compute_speedup_openmp(df_med: pd.DataFrame, base: pd.DataFrame) -> pd.DataF
     """
     df = df_med.copy()
     df = df.merge(base, on="dataset", how="left")  # adiciona tempo_serial_ms
-    # Para rep=0, usamos median_ms como tempo da config
     df["speedup"] = df["tempo_serial_ms"] / df["median_ms"]
     return df
 
@@ -333,26 +344,129 @@ def plot_cuda_throughput_speedup(df_cuda: pd.DataFrame, dataset: str, outdir: st
     plt.close()
 
 
-# ===================== COMPARAÇÃO GLOBAL (SEQ x OMP x CUDA) =====================
+# ===================== FUNÇÕES PARA MPI =====================
+
+def prepare_mpi_summary(df_mpi_med: pd.DataFrame,
+                        base: pd.DataFrame,
+                        best_omp: pd.DataFrame | None = None) -> pd.DataFrame:
+    """
+    Monta tabela de medianas MPI com:
+      - threads (nº de processos)
+      - median_ms (tempo total K-means)
+      - comm_ms  = tempo de comunicação (Allreduce)
+      - comp_ms  = tempo de computação aproximado (total - comm)
+      - throughput_pts_s
+      - speedup_seq (vs sequencial)
+      - speedup_omp (vs melhor OMP, se fornecido)
+    """
+    df_mpi = df_mpi_med.copy()
+    if df_mpi.empty:
+        return df_mpi
+
+    df_mpi = df_mpi.merge(base, on="dataset", how="left")  # tempo_serial_ms
+    df_mpi["N"] = df_mpi["dataset"].map(DATASET_N).astype(float)
+
+    df_mpi["throughput_pts_s"] = np.where(
+        df_mpi["median_ms"] > 0,
+        df_mpi["N"] * 1000.0 / df_mpi["median_ms"],
+        np.nan
+    )
+    df_mpi["speedup_seq"] = df_mpi["tempo_serial_ms"] / df_mpi["median_ms"]
+
+    # Nas linhas medianas (rep=0), h2d_ms armazena comm_ms e kernel_ms armazena comp_ms
+    df_mpi["comm_ms"] = df_mpi["h2d_ms"]
+    df_mpi["comp_ms"] = df_mpi["kernel_ms"]
+
+    if best_omp is not None and not best_omp.empty:
+        best = best_omp[["dataset", "tempo_omp_ms"]].copy()
+        df_mpi = df_mpi.merge(best, on="dataset", how="left")
+        df_mpi["speedup_omp"] = df_mpi["tempo_omp_ms"] / df_mpi["median_ms"]
+    else:
+        df_mpi["speedup_omp"] = np.nan
+
+    return df_mpi
+
+
+def plot_mpi_time_speedup(df_mpi: pd.DataFrame, dataset: str, outdir: str):
+    """Gráficos Tempo vs Processos e Speedup vs Processos para MPI."""
+    os.makedirs(outdir, exist_ok=True)
+    d = df_mpi[df_mpi["dataset"] == dataset].copy()
+    if d.empty:
+        return
+
+    d = d.sort_values("threads")
+
+    # Tempo vs Processos
+    plt.figure()
+    plt.plot(d["threads"], d["median_ms"], marker="o")
+    plt.xlabel("Processos MPI (P)")
+    plt.ylabel("Tempo total (ms)")
+    plt.title(f"MPI — Tempo vs Processos — dataset {dataset}")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{dataset}_mpi_tempo_vs_procs.png"))
+    plt.close()
+
+    # Speedup vs Processos
+    plt.figure()
+    plt.plot(d["threads"], d["speedup_seq"], marker="o", label="Speedup vs seq")
+    plt.xlabel("Processos MPI (P)")
+    plt.ylabel("Speedup (vs sequencial)")
+    plt.title(f"MPI — Speedup vs Processos — dataset {dataset}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{dataset}_mpi_speedup_vs_procs.png"))
+    plt.close()
+
+
+def plot_mpi_comm_breakdown(df_mpi: pd.DataFrame, dataset: str, outdir: str):
+    """Gráfico comparando tempo total, comunicação (Allreduce) e computação vs processos."""
+    os.makedirs(outdir, exist_ok=True)
+    d = df_mpi[df_mpi["dataset"] == dataset].copy()
+    if d.empty:
+        return
+
+    d = d.sort_values("threads")
+
+    plt.figure()
+    plt.plot(d["threads"], d["median_ms"], marker="o", label="Total (ms)")
+    plt.plot(d["threads"], d["comm_ms"], marker="o", label="Comunicação (Allreduce) (ms)")
+    plt.plot(d["threads"], d["comp_ms"], marker="o", label="Computação aprox. (ms)")
+    plt.xlabel("Processos MPI (P)")
+    plt.ylabel("Tempo (ms)")
+    plt.title(f"MPI — Decomposição de tempo — dataset {dataset}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, f"{dataset}_mpi_breakdown_vs_procs.png"))
+    plt.close()
+
+
+# ===================== COMPARAÇÃO GLOBAL (SEQ x OMP x CUDA x MPI) =====================
 
 def make_global_comparison(base: pd.DataFrame,
                            df_omp_med: pd.DataFrame | None,
                            df_cuda_med: pd.DataFrame | None,
+                           df_mpi_med: pd.DataFrame | None,
                            outdir_root: str) -> None:
     """
     Gera um CSV comparando:
       - sequencial
-      - melhor configuração OpenMP por dataset
-      - todas as configurações CUDA (por block)
+      - melhor configuração OpenMP por dataset (se existir)
+      - todas as configurações CUDA (por block) (se existirem)
+      - melhor configuração MPI por dataset (se existir)
     Com:
       - tempo (ms)
       - throughput (pontos/s)
       - speedup vs seq
-      - speedup vs melhor OMP (para CUDA)
+      - speedup vs melhor OMP (para CUDA e MPI, se OMP existir)
     """
-    if df_omp_med is None or df_cuda_med is None:
-        return
-    if df_omp_med.empty or df_cuda_med.empty:
+    has_omp = df_omp_med is not None and not df_omp_med.empty
+    has_cuda = df_cuda_med is not None and not df_cuda_med.empty
+    has_mpi = df_mpi_med is not None and not df_mpi_med.empty
+
+    if not (has_omp or has_cuda or has_mpi):
         return
 
     # Baseline seq: tempo e throughput
@@ -364,42 +478,53 @@ def make_global_comparison(base: pd.DataFrame,
         np.nan
     )
 
-    # Melhor OMP por dataset (menor median_ms)
-    df_omp_med = df_omp_med.copy()
-    best_omp = (
-        df_omp_med
-        .sort_values(["dataset", "median_ms"])
-        .groupby("dataset", as_index=False)
-        .first()
-    )
-    best_omp = best_omp.rename(columns={"median_ms": "tempo_omp_ms"})
-    best_omp["N"] = best_omp["dataset"].map(DATASET_N).astype(float)
-    best_omp["throughput_pts_s"] = np.where(
-        best_omp["tempo_omp_ms"] > 0,
-        best_omp["N"] * 1000.0 / best_omp["tempo_omp_ms"],
-        np.nan
-    )
+    best_omp = None
+    if has_omp:
+        df_omp_med = df_omp_med.copy()
+        best_omp = (
+            df_omp_med
+            .sort_values(["dataset", "median_ms"])
+            .groupby("dataset", as_index=False)
+            .first()
+        )
+        best_omp = best_omp.rename(columns={"median_ms": "tempo_omp_ms"})
+        best_omp["N"] = best_omp["dataset"].map(DATASET_N).astype(float)
+        best_omp["throughput_pts_s"] = np.where(
+            best_omp["tempo_omp_ms"] > 0,
+            best_omp["N"] * 1000.0 / best_omp["tempo_omp_ms"],
+            np.nan
+        )
+        best_omp = best_omp.merge(
+            df_omp_med[["dataset", "threads", "schedule", "chunk", "median_ms", "speedup"]],
+            on=["dataset", "threads", "schedule", "chunk"],
+            how="left",
+            suffixes=("", "_chk")
+        )
+        best_omp["speedup_seq"] = best_omp["speedup"]
 
-    best_omp = best_omp.merge(
-        df_omp_med[["dataset", "threads", "schedule", "chunk", "median_ms", "speedup"]],
-        on=["dataset", "threads", "schedule", "chunk"],
-        how="left",
-        suffixes=("", "_chk")
-    )
-    best_omp["speedup_seq"] = best_omp["speedup"]
+    df_cuda = None
+    if has_cuda:
+        df_cuda = df_cuda_med.copy()
+        if best_omp is not None:
+            df_cuda = df_cuda.merge(
+                best_omp[["dataset", "tempo_omp_ms"]],
+                on="dataset", how="left"
+            )
+            df_cuda["speedup_omp"] = df_cuda["tempo_omp_ms"] / df_cuda["total_ms"]
+        else:
+            df_cuda["speedup_omp"] = np.nan
 
-    df_cuda = df_cuda_med.copy()
-    df_cuda = df_cuda.merge(
-        best_omp[["dataset", "tempo_omp_ms"]],
-        on="dataset", how="left"
-    )
-    df_cuda["speedup_omp"] = df_cuda["tempo_omp_ms"] / df_cuda["total_ms"]
+    df_mpi_summary = None
+    if has_mpi:
+        df_mpi_summary = prepare_mpi_summary(df_mpi_med, base, best_omp)
 
-    # Monta tabela final
     rows = []
-    all_datasets = sorted(set(base["dataset"].dropna().unique())
-                          | set(best_omp["dataset"].dropna().unique())
-                          | set(df_cuda["dataset"].dropna().unique()))
+    all_datasets = sorted(
+        set(base["dataset"].dropna().unique())
+        | (set(best_omp["dataset"].dropna().unique()) if best_omp is not None else set())
+        | (set(df_cuda["dataset"].dropna().unique()) if df_cuda is not None else set())
+        | (set(df_mpi_summary["dataset"].dropna().unique()) if df_mpi_summary is not None else set())
+    )
 
     for ds in all_datasets:
         # Sequencial
@@ -421,51 +546,73 @@ def make_global_comparison(base: pd.DataFrame,
             })
 
         # Melhor OMP
-        o = best_omp[best_omp["dataset"] == ds]
-        if not o.empty:
-            r = o.iloc[0]
-            cfg_label = f"omp_T{int(r['threads'])}_{r['schedule']}"
-            if r["chunk"] != "NA":
-                cfg_label += f",chunk={r['chunk']}"
-            rows.append({
-                "dataset": ds,
-                "modo": "omp",
-                "config": cfg_label,
-                "threads": r["threads"],
-                "block": np.nan,
-                "schedule": r["schedule"],
-                "chunk": r["chunk"],
-                "tempo_ms": r["tempo_omp_ms"],
-                "throughput_pts_s": r["throughput_pts_s"],
-                "speedup_seq": r["speedup_seq"],
-                "speedup_omp": np.nan,
-            })
+        if best_omp is not None:
+            o = best_omp[best_omp["dataset"] == ds]
+            if not o.empty:
+                r = o.iloc[0]
+                cfg_label = f"omp_T{int(r['threads'])}_{r['schedule']}"
+                if r["chunk"] != "NA":
+                    cfg_label += f",chunk={r['chunk']}"
+                rows.append({
+                    "dataset": ds,
+                    "modo": "omp",
+                    "config": cfg_label,
+                    "threads": r["threads"],
+                    "block": np.nan,
+                    "schedule": r["schedule"],
+                    "chunk": r["chunk"],
+                    "tempo_ms": r["tempo_omp_ms"],
+                    "throughput_pts_s": r["throughput_pts_s"],
+                    "speedup_seq": r["speedup_seq"],
+                    "speedup_omp": np.nan,
+                })
 
         # Todas as configs CUDA (por block)
-        c = df_cuda[df_cuda["dataset"] == ds].sort_values("block")
-        for _, r in c.iterrows():
-            cfg_label = f"cuda_block{int(r['block'])}"
-            rows.append({
-                "dataset": ds,
-                "modo": "cuda",
-                "config": cfg_label,
-                "threads": np.nan,
-                "block": r["block"],
-                "schedule": "NA",
-                "chunk": "NA",
-                "tempo_ms": r["total_ms"],
-                "throughput_pts_s": r["throughput_pts_s"],
-                "speedup_seq": r["speedup_seq"],
-                "speedup_omp": r["speedup_omp"],
-            })
+        if df_cuda is not None:
+            c = df_cuda[df_cuda["dataset"] == ds].sort_values("block")
+            for _, r in c.iterrows():
+                cfg_label = f"cuda_block{int(r['block'])}"
+                rows.append({
+                    "dataset": ds,
+                    "modo": "cuda",
+                    "config": cfg_label,
+                    "threads": np.nan,
+                    "block": r["block"],
+                    "schedule": "NA",
+                    "chunk": "NA",
+                    "tempo_ms": r["total_ms"],
+                    "throughput_pts_s": r["throughput_pts_s"],
+                    "speedup_seq": r["speedup_seq"],
+                    "speedup_omp": r.get("speedup_omp", np.nan),
+                })
+
+        # Melhor MPI por dataset (menor median_ms)
+        if df_mpi_summary is not None:
+            m = df_mpi_summary[df_mpi_summary["dataset"] == ds].sort_values("median_ms")
+            if not m.empty:
+                r = m.iloc[0]
+                cfg_label = f"mpi_P{int(r['threads'])}"
+                rows.append({
+                    "dataset": ds,
+                    "modo": "mpi",
+                    "config": cfg_label,
+                    "threads": r["threads"],
+                    "block": np.nan,
+                    "schedule": "NA",
+                    "chunk": "NA",
+                    "tempo_ms": r["median_ms"],
+                    "throughput_pts_s": r["throughput_pts_s"],
+                    "speedup_seq": r["speedup_seq"],
+                    "speedup_omp": r.get("speedup_omp", np.nan),
+                })
 
     df_global = pd.DataFrame(rows)
     outdir = os.path.join(outdir_root, "global")
     os.makedirs(outdir, exist_ok=True)
-    out_path = os.path.join(outdir, "comparacao_seq_omp_cuda.csv")
+    out_path = os.path.join(outdir, "comparacao_seq_omp_cuda_mpi.csv")
     df_global.to_csv(out_path, index=False)
 
-    print("\n[GLOBAL] Comparação seq x melhor OMP x CUDA gerada.")
+    print("\n[GLOBAL] Comparação seq x OMP x CUDA x MPI gerada.")
     print(f"CSV: {out_path}")
     print("Colunas: dataset, modo, config, tempo_ms, throughput_pts_s, speedup_seq, speedup_omp")
 
@@ -475,16 +622,36 @@ def make_global_comparison(base: pd.DataFrame,
 def main():
     if len(sys.argv) < 3:
         print("Uso:")
-        print("  python3 analisar_bench.py resultados_XXXX.csv openmp")
-        print("  python3 analisar_bench.py resultados_XXXX.csv cuda")
-        print("  python3 analisar_bench.py resultados_XXXX.csv all")
+        print("  python3 analisar_bench.py resultados_XXXX.csv --openmp")
+        print("  python3 analisar_bench.py resultados_XXXX.csv --cuda")
+        print("  python3 analisar_bench.py resultados_XXXX.csv --mpi")
+        print("  python3 analisar_bench.py resultados_XXXX.csv --all")
         sys.exit(1)
 
     csv_path = sys.argv[1]
-    mode = sys.argv[2].lower()
+    flags = [a.lower() for a in sys.argv[2:]]
 
-    if mode not in ("openmp", "cuda", "all"):
-        print("Modo inválido. Use 'openmp', 'cuda' ou 'all'.")
+    DO_OMP = False
+    DO_CUDA = False
+    DO_MPI = False
+
+    for a in flags:
+        if a == "--openmp":
+            DO_OMP = True
+        elif a == "--cuda":
+            DO_CUDA = True
+        elif a == "--mpi":
+            DO_MPI = True
+        elif a == "--all":
+            DO_OMP = True
+            DO_CUDA = True
+            DO_MPI = True
+        else:
+            print(f"Flag desconhecida: {a}")
+            sys.exit(1)
+
+    if not (DO_OMP or DO_CUDA or DO_MPI):
+        print("Nenhum modo selecionado. Use ao menos uma das flags: --openmp, --cuda, --mpi, --all.")
         sys.exit(1)
 
     df = load_csv(csv_path)
@@ -501,15 +668,16 @@ def main():
 
     df_omp_med = None
     df_cuda_med = None
+    df_mpi_med = None
 
-    if mode in ("openmp", "all"):
+    if DO_OMP:
         outdir_omp = os.path.join(root_outdir, "openmp")
         os.makedirs(outdir_omp, exist_ok=True)
 
         # ====== ANALISE OPENMP ======
         df_omp_med = df_med[df_med["modo"] == "omp"].copy()
         if df_omp_med.empty:
-            print("Não há linhas com modo='omp' (OpenMP) no CSV.")
+            print("Não há linhas com modo='omp' (OpenMP) no CSV (rep=0).")
         else:
             df_omp_med = compute_speedup_openmp(df_omp_med, base)
 
@@ -543,7 +711,7 @@ def main():
             print(f"- Validação SSE: {outdir_omp}/validacao_sse.txt")
             print(f"- Tabelas: {outdir_omp}/openmp_curvas_tempo_speedup.csv e openmp_melhor_config_por_threads.csv")
 
-    if mode in ("cuda", "all"):
+    if DO_CUDA:
         outdir_cuda = os.path.join(root_outdir, "cuda")
         os.makedirs(outdir_cuda, exist_ok=True)
 
@@ -572,9 +740,39 @@ def main():
             print(f"- Tabela consolidada: {outdir_cuda}/cuda_resumo.csv")
             print("  (contém block, grid, tempos H2D/Kernel/D2H/Total, throughput e speedup vs seq)")
 
-    # Comparação global (somente se 'all')
-    if mode == "all":
-        make_global_comparison(base, df_omp_med, df_cuda_med, root_outdir)
+    if DO_MPI:
+        outdir_mpi = os.path.join(root_outdir, "mpi")
+        os.makedirs(outdir_mpi, exist_ok=True)
+
+        # ====== ANALISE MPI ======
+        df_mpi_med = df_med[df_med["modo"] == "mpi"].copy()
+        if df_mpi_med.empty:
+            print("Não há linhas com modo='mpi' no CSV (rep=0).")
+        else:
+            df_mpi_summary = prepare_mpi_summary(df_mpi_med, base, best_omp=None)
+
+            # Tabela consolidada
+            cols_mpi = [
+                "dataset", "threads", "median_ms", "comm_ms", "comp_ms",
+                "throughput_pts_s", "speedup_seq"
+            ]
+            df_mpi_summary[cols_mpi].sort_values(["dataset", "threads"]).to_csv(
+                os.path.join(outdir_mpi, "mpi_resumo.csv"), index=False
+            )
+
+            # Gráficos por dataset
+            for ds in sorted(df_mpi_summary["dataset"].dropna().unique()):
+                plot_mpi_time_speedup(df_mpi_summary, ds, outdir_mpi)
+                plot_mpi_comm_breakdown(df_mpi_summary, ds, outdir_mpi)
+
+            print("\nConcluído (modo MPI).")
+            print(f"- Figuras em: {outdir_mpi}/*mpi_*.png")
+            print(f"- Tabela consolidada: {outdir_mpi}/mpi_resumo.csv")
+            print("  (contém P, tempos total/comunicação/compute, throughput e speedup vs seq)")
+
+    # Comparação global (se houver pelo menos um paralelo além do seq)
+    if DO_OMP or DO_CUDA or DO_MPI:
+        make_global_comparison(base, df_omp_med, df_cuda_med, df_mpi_med, root_outdir)
 
 
 if __name__ == "__main__":
