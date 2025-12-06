@@ -1,16 +1,25 @@
-# K-means 1D — Versão Sequencial, OpenMP e CUDA
+# 📘 **K-means 1D — Versões Sequencial, OpenMP, CUDA e MPI**
 
-Este projeto implementa o algoritmo **K-means 1D** em diferentes versões:
+Este projeto implementa o algoritmo **K-means 1D** em múltiplas arquiteturas de paralelização:
 
-* **Naive (sequencial – baseline)**
-* **OpenMP (paralelização em CPU)**
-* **CUDA (paralelização em GPU)**
+* **Naive (Sequencial – baseline)**
+* **OpenMP (CPU multithread)**
+* **CUDA (GPU)**
+* **MPI (processamento distribuído com múltiplos processos)**
 
-O objetivo é **avaliar o impacto da paralelização** no tempo de execução, throughput, custo de comunicação e speedup, produzindo métricas numéricas e gráficos automáticos.
+O objetivo é avaliar:
+
+* **Strong scaling**: desempenho à medida que aumentamos P (processos/threads)
+* **Custo de comunicação** (ex.: Allreduce no MPI)
+* **Throughput (pontos/s)**
+* **Speedup**
+* **Corretude (comparação de SSE)**
+
+Toda a execução, coleta de dados e análise gráfica é automatizada pelos scripts incluídos.
 
 ---
 
-## 📁 Estrutura do Repositório
+# 📁 **Estrutura do Repositório**
 
 ```
 .
@@ -32,73 +41,96 @@ O objetivo é **avaliar o impacto da paralelização** no tempo de execução, t
 ├── cuda/
 │   └── kmeans_1d_cuda.cu
 │
-├── run_bench.sh               # Script de benchmark unificado
-├── analisar_bench.py          # Consolidação + gráficos + validação
-├── figs_bench/                # Gerado automaticamente
+├── mpi/
+│   └── kmeans_1d_mpi.c
+│
+├── run_bench.sh               # Script unificado de benchmark
+├── analisar_bench.py          # Gráficos, tabelas, speedups e validação
+├── figs_bench/                # Saída automática dos gráficos
 │   ├── openmp/
 │   ├── cuda/
-│   └── global/    
+│   ├── mpi/
+│   └── global/
 └── README.md
 ```
 
 ---
 
-# 📌 Descrição das Versões e das Métricas
+# 📌 **Descrição das Versões e Métricas**
 
 ## 🔹 **1. Naive (Sequencial – CPU)**
 
-Versão baseline usada como referência para speedup.
+Versão básica usada como baseline.
 
-**Métricas extraídas:**
+**Métricas:**
 
-* Tempo total de execução
-* Iterações até convergência
+* Tempo total
+* Iterações
 * SSE final (para verificação de corretude)
 
 ---
 
-## 🔹 **2. OpenMP (CPU paralela)**
+## 🔹 **2. OpenMP (CPU multithread)**
 
-Utiliza paralelização com múltiplas threads e diferentes configurações:
+Configurações testadas:
 
-* Threads: 1, 2, 4, 8, 16
-* Schedules: `static` e `dynamic`
-* Chunk sizes: 1, 64, 256, 1024
+* Threads: `1, 2, 4, 8, 16`
+* Schedules: `static`, `dynamic`
+* Chunk sizes: `1, 64, 256, 1024`
 
-**Métricas extraídas:**
+**Métricas:**
 
-* Tempo de execução (mediana de 5 execuções)
-* Speedup em relação ao sequencial
+* Tempo (mediana de 5 execuções)
+* Speedup vs. sequencial
 * Throughput (pontos/s)
 * SSE final
-* Comparação entre escalonamentos e chunks
+* Comparação de escalonamento e chunk
 
 ---
 
 ## 🔹 **3. CUDA (GPU)**
 
-Implementação paralela utilizando kernels CUDA.
+Implementação paralela com kernels CUDA.
+
+**Métricas:**
+
+* H2D, Kernel, D2H
+* Tempo total
+* Throughput
+* Speedup vs. sequencial e vs OpenMP
+* Grid size e block size
+
+---
+
+## 🔹 **4. MPI (Processos distribuídos)**
+
+Versão paralela com **MPI**, baseada na divisão do vetor de pontos entre os processos.
+
+Cada iteração faz:
+
+1. **Broadcast** dos centróides (C)
+2. **Assignment local** em cada processo
+3. **Reduções globais**:
+
+   * `MPI_Reduce` para SSE
+   * `MPI_Allreduce` para somas e contagens
+4. **Update global** dos centróides
 
 **Métricas extraídas:**
 
-* Tempo de cópia Host → Device (H2D)
-* Tempo de cópia Device → Host (D2H)
-* Tempo de execução do kernel
-* Tempo total da execução
+* Tempo total
+* Tempo de comunicação (Allreduce)
+* Tempo de computação aproximado
+* Strong scaling para P = 1, 2, 4, 8, …
+* Speedup vs. sequencial
+* Speedup vs. melhor OpenMP
 * Throughput (pontos/s)
-* Speedup vs. sequencial e vs. OpenMP
-* Tamanhos de:
-
-  * **grid**
-  * **block** (ex.: 128, 256, 512)
-
-Tudo isso já é coletado automaticamente pelo `run_bench.sh`.
 
 ---
 
 # 🚀 Como Executar
 
-## 1️⃣ Gerar conjuntos de teste
+## 1️⃣ **Gerar conjuntos de teste**
 
 ```bash
 cd conjuntos_teste
@@ -106,80 +138,88 @@ chmod +x pipeline.sh
 ./pipeline.sh
 ```
 
-Isso cria automaticamente os conjuntos **p**, **m** e **g**.
-
 ---
 
-## 2️⃣ Executar benchmark
+# 2️⃣ **Executar os benchmarks**
 
-O script `run_bench.sh` aceita parâmetros:
+O script unificado aceita flags:
 
-### 🔸 Rodar **apenas sequencial + OpenMP**
+* `--omp`
+* `--cuda`
+* `--mpi`
+* `--all`
 
+### 🔸 Somente Sequencial + MPI
+
+```bash
+./run_bench.sh --mpi
 ```
+
+### 🔸 Sequencial + OpenMP
+
+```bash
 ./run_bench.sh --omp
 ```
 
-### 🔸 Rodar **sequencial + CUDA**
+### 🔸 Sequencial + CUDA
 
-```
+```bash
 ./run_bench.sh --cuda
 ```
 
-### 🔸 Rodar **somente sequencial**
+### 🔸 Todas as versões (seq + omp + cuda + mpi)
 
-```
-./run_bench.sh
-```
-
-### 🔸 Rodar **todas as versões**
-
-```
-./run_bench.sh --omp --cuda
+```bash
+./run_bench.sh --all
 ```
 
-### 📌 O que o script faz automaticamente:
+### 📌 Saída do script
 
-* Compila Naive, OpenMP e/ou CUDA conforme parâmetros
-* Roda benchmarks completos com 5 repetições
-* Gera medições, medianas e speedups
-* Cria nomes de CSV como:
+Gera arquivos no formato:
 
 ```
-resultados_omp_YYYYMMDD_HHMMSS.csv
-resultados_cuda_YYYYMMDD_HHMMSS.csv
-resultados_omp_cuda_YYYYMMDD_HHMMSS.csv
+resultados_omp_mpi_YYYYMMDD_HHMMSS.csv
+resultados_omp_cuda_mpi_YYYYMMDD_HHMMSS.csv
+resultados_mpi_YYYYMMDD_HHMMSS.csv
+```
+
+Incluindo:
+
+* tempos
+* iterações
+* SSE final
+* tempo de comunicação (MPI)
+* throughput
+* parâmetros (threads, blocks, processos, schedule)
+
+---
+
+# 3️⃣ **Gerar gráficos e tabelas**
+
+Novo formato:
+
+```
+python3 analisar_bench.py <arquivo_csv> --mpi
+python3 analisar_bench.py <arquivo_csv> --openmp
+python3 analisar_bench.py <arquivo_csv> --cuda
+python3 analisar_bench.py <arquivo_csv> --all
+```
+
+### 🔸 Exemplo: comparar **naive × MPI**
+
+```bash
+python3 analisar_bench.py resultados_mpi_YYYYMMDD_HHMMSS.csv --mpi
+```
+
+### 🔸 Rodar tudo
+
+```bash
+python3 analisar_bench.py resultados_omp_cuda_mpi_YYYYMMDD_HHMMSS.csv --all
 ```
 
 ---
 
-## 3️⃣ Gerar gráficos e tabelas com Python
-
-O script `analisar_bench.py` recebe dois parâmetros:
-
-```
-python3 analisar_bench.py <arquivo_csv> <modo>
-```
-
-### 🔸 Processar **somente resultados CUDA**
-
-```
-python3 analisar_bench.py resultados_cuda.csv cuda
-```
-
-### 🔸 Processar **somente resultados OpenMP**
-
-```
-python3 analisar_bench.py resultados_omp.csv omp
-```
-
-### 🔸 Processar **todas as versões juntas (Serial + OpenMP + CUDA)**
-
-```
-python3 analisar_bench.py resultados_omp_cuda.csv all
-```
-
-O script identifica automaticamente os modos presentes (Serial, OpenMP, CUDA) e gera a seguinte estrutura:
+# 📊 Estrutura de Saída dos Gráficos
 
 ```
 figs_bench/
@@ -191,50 +231,45 @@ figs_bench/
 │   ├── p_cuda_*.png
 │   ├── m_cuda_*.png
 │   └── g_cuda_*.png
+├── mpi/
+│   ├── p_mpi_tempo_vs_procs.png
+│   ├── p_mpi_speedup_vs_procs.png
+│   └── p_mpi_breakdown_vs_procs.png
 └── global/
-    └── comparacao_seq_omp_cuda.csv
+    └── comparacao_seq_omp_cuda_mpi.csv
 ```
 
-A pasta **openmp/** contém gráficos de:
+### **MPI – gráficos incluídos**
 
-* tempo × threads
-* throughput × threads
-* speedup vs. sequência
-* efeitos de scheduler e chunk
+* **Tempo total vs processos** (Strong scaling)
+* **Speedup vs sequencial**
+* **Tempo total × comunicação (Allreduce) × computação**
 
-A pasta **cuda/** contém gráficos de:
+Esses gráficos atendem exatamente aos requisitos do enunciado:
 
-* tempo × block size
-* throughput × block size
-* speedup vs. serial e vs. OpenMP
-
-A pasta **global/** contém:
-
-* **`comparacao_seq_omp_cuda.csv`** — tabela consolidada comparando Serial × OpenMP × CUDA
-  (usada para gerar tabelas de avaliação no relatório)
-
-Além disso, o script também gera:
-
-* **`validacao_sse.txt`** — confirma corretude entre todas as versões
-* Relatório no terminal com as melhores configurações encontradas por modo
+✔ Strong scaling
+✔ Tempo de comunicação
+✔ Speedup vs serial e vs OpenMP
 
 ---
 
 # 🧰 Dependências
 
-### **Para compilação**
+### Compilação:
 
-* GCC com suporte a OpenMP
-* NVCC (CUDA Toolkit)
+* GCC com OpenMP
+* NVCC (para CUDA)
+* MPI (OpenMPI ou MPICH)
 
-### **Para análise**
+Compilação manual:
+
+```bash
+mpicc -O2 -std=c99 kmeans_1d_mpi.c -o kmeans_1d_mpi -lm
+```
+
+### Ambiente Python:
 
 ```
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
-
-### Ambiente recomendado
-
-* **WSL2 + VSCode**
-* GPU NVIDIA com CUDA disponível (para testes CUDA)

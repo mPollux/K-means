@@ -7,13 +7,15 @@ usage() {
 Uso: $0 [opções]
 
 Por padrão roda apenas o sequencial (naive).
-Acrescente --omp e/ou --cuda para rodar também essas variantes.
+Acrescente --omp, --cuda e/ou --mpi para rodar também essas variantes.
 
 Opções:
   --omp                    Executa seção OpenMP
   --cuda                   Executa seção CUDA
+  --mpi                    Executa seção MPI
   --reps N                 Número de repetições por combinação (default: 5)
   --threads "1,2,4,8,16"   Lista de threads p/ OMP (default: "1,2,4,8,16")
+  --procs "1,2,4,8"        Lista de processos p/ MPI (default: "1,2,4,8")
   --blocksizes "128,256"   Lista de block sizes p/ CUDA (default: "128,256,512")
   --datasets "p,m,g"       Quais datasets (default: "p,m,g")
   --max-iter N             Máximo de iterações (default: 50)
@@ -27,16 +29,21 @@ Exemplos:
   # naive + CUDA com blocks 256 e 512
   $0 --cuda --blocksizes "256,512"
 
-  # naive + OMP + CUDA
-  $0 --omp --cuda --reps 3 --threads "1,4,8" --blocksizes "128,256"
+  # naive + MPI (strong scaling em P=1,2,4,8)
+  $0 --mpi --procs "1,2,4,8"
+
+  # naive + OMP + CUDA + MPI
+  $0 --omp --cuda --mpi --reps 3 --threads "1,4,8" --procs "1,2,4" --blocksizes "128,256"
 EOF
 }
 
 # ===================== PARÂMETROS =====================
 DO_OMP=0
 DO_CUDA=0
+DO_MPI=0
 REPS=5
 THREADS_STR="1,2,4,8,16"
+PROCS_STR="1,2,4,8"
 BLOCKSIZES_STR="128,256,512"
 DATASETS_STR="p,m,g"
 MAX_ITER=50
@@ -46,8 +53,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --omp) DO_OMP=1; shift ;;
     --cuda) DO_CUDA=1; shift ;;
+    --mpi) DO_MPI=1; shift ;;
     --reps) REPS="${2:?}"; shift 2 ;;
     --threads) THREADS_STR="${2:?}"; shift 2 ;;
+    --procs) PROCS_STR="${2:?}"; shift 2 ;;
     --blocksizes) BLOCKSIZES_STR="${2:?}"; shift 2 ;;
     --datasets) DATASETS_STR="${2:?}"; shift 2 ;;
     --max-iter) MAX_ITER="${2:?}"; shift 2 ;;
@@ -59,18 +68,19 @@ done
 
 # Converte listas string -> arrays bash
 IFS=',' read -r -a THREADS <<< "$THREADS_STR"
+IFS=',' read -r -a PROCS   <<< "$PROCS_STR"
 IFS=',' read -r -a BLOCKSIZES <<< "$BLOCKSIZES_STR"
 IFS=',' read -r -a DATASETS <<< "$DATASETS_STR"
 
-# ===================== COMPILAÇÃO (CPU / GPU) =====================
+# ===================== COMPILAÇÃO (CPU / GPU / MPI) =====================
 SERIAL_DIR="./serial"
 OMP_DIR="./openmp"
 CUDA_DIR="./cuda"
+MPI_DIR="./mpi"
 
 # --- Compilação do sequencial (sempre) ---
 echo "==> Compilando kmeans_1d_naive.c (sem OpenMP, usa clock())"
 gcc -O2 -std=c99 "${SERIAL_DIR}/kmeans_1d_naive.c" -o kmeans_1d_naive -lm
-
 [ -x ./kmeans_1d_naive ] || { echo "ERRO: kmeans_1d_naive não gerado."; exit 1; }
 
 # --- Compilação do OpenMP (somente se --omp foi passado) ---
@@ -103,11 +113,27 @@ if (( DO_CUDA )); then
   fi
 fi
 
+# --- Compilação do MPI (somente se --mpi foi passado) ---
+if (( DO_MPI )); then
+  echo "==> Compilando kmeans_1d_mpi.c (MPI)"
+  if command -v mpicc >/dev/null 2>&1; then
+    if [[ -f "${MPI_DIR}/kmeans_1d_mpi.c" ]]; then
+      mpicc -O2 -std=c99 "${MPI_DIR}/kmeans_1d_mpi.c" -o kmeans_1d_mpi -lm
+      [ -x ./kmeans_1d_mpi ] || { echo "ERRO: kmeans_1d_mpi não gerado."; exit 1; }
+    else
+      echo "ERRO: arquivo ${MPI_DIR}/kmeans_1d_mpi.c não encontrado!"
+      exit 1
+    fi
+  else
+    echo "ERRO: mpicc não encontrado no PATH."
+    echo "→ Dica: instale OpenMPI ou MPICH e adicione mpicc/mpirun ao PATH."
+    exit 1
+  fi
+fi
+
 # ===================== CONFIGURAÇÃO DE ARQUIVOS =====================
-# Caminho base dos arquivos de entrada
 BASE_DIR="./conjuntos_teste"
 
-# Mapear nomes conforme seus CSVs
 declare -A DADOS_MAP CENTR_MAP
 DADOS_MAP=( 
   ["p"]="${BASE_DIR}/dados_p.csv"
@@ -126,8 +152,16 @@ CHUNKS=(1 64 256 1024)
 
 STAMP=$(date +"%Y%m%d_%H%M%S")
 
-if (( DO_OMP )) && (( DO_CUDA )); then
+if (( DO_OMP )) && (( DO_CUDA )) && (( DO_MPI )); then
+    MODE="omp_cuda_mpi"
+elif (( DO_OMP )) && (( DO_CUDA )); then
     MODE="omp_cuda"
+elif (( DO_OMP )) && (( DO_MPI )); then
+    MODE="omp_mpi"
+elif (( DO_CUDA )) && (( DO_MPI )); then
+    MODE="cuda_mpi"
+elif (( DO_MPI )); then
+    MODE="mpi"
 elif (( DO_CUDA )); then
     MODE="cuda"
 elif (( DO_OMP )); then
@@ -184,6 +218,49 @@ parse_line_cuda() {
   '
 }
 
+# Parse da saída do MPI:
+# Espera linhas do tipo:
+#   Iterações: X
+#   SSE final: Y
+#   Tempo total (apenas K-means): Z ms
+#   Tempo de comunicação (Allreduce): W ms
+parse_line_mpi() {
+  awk '
+    /Itera/ {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^Iterações:/) { iters=$(i+1) }
+      }
+      gsub(/\r/,"",iters)
+    }
+    /SSE final:/ {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^SSE/) { sse=$(i+2) }
+      }
+      gsub(/\r/,"",sse)
+    }
+    /Tempo total/ {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^Tempo/) { total=$(i+4) }  # "Tempo total (apenas K-means): XXX ms"
+      }
+      gsub(/ms/,"",total); gsub(/\r/,"",total)
+    }
+    /Tempo de comunicação/ {
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^Tempo/) { comm=$(i+4) }  # "Tempo de comunicação (Allreduce): YYY ms"
+      }
+      gsub(/ms/,"",comm); gsub(/\r/,"",comm)
+    }
+    END {
+      if (iters == "") iters="NA";
+      if (sse == "")   sse="NA";
+      if (total == "") total="NA";
+      if (comm == "")  comm="NA";
+      # imprime: iters sse total_ms comm_ms
+      print iters, sse, total, comm
+    }
+  '
+}
+
 median() {
   awk '{a[NR]=$1} END{
     if (NR==0) {print "NA"; exit}
@@ -205,6 +282,10 @@ run_one_cuda() {
   local dados="$1" centr="$2" block="$3"
   ./kmeans_1d_cuda "$dados" "$centr" "$MAX_ITER" "$EPS" "$block" | parse_line_cuda
 }
+run_one_mpi() {
+  local dados="$1" centr="$2" procs="$3"
+  mpirun -np "$procs" ./kmeans_1d_mpi "$dados" "$centr" "$MAX_ITER" "$EPS" | parse_line_mpi
+}
 
 write_header() {
   echo "dataset,modo,threads,schedule,chunk,block,rep,iters,sse_final,time_ms,median_ms,h2d_ms,kernel_ms,d2h_ms,total_ms" > "$OUTCSV"
@@ -225,6 +306,31 @@ append_csv_cuda() {
 append_csv_cuda_median() {
   local dataset="$1" block="$2" median_total="$3"
   echo "${dataset},cuda,NA,NA,NA,${block},0,NA,NA,NA,${median_total},NA,NA,NA,${median_total}" >> "$OUTCSV"
+}
+
+# Para MPI, usamos:
+#   modo=mpi
+#   threads = número de processos (P)
+#   time_ms = tempo total do K-means
+#   h2d_ms  = tempo de comunicação (Allreduce)
+#   kernel_ms = tempo de computação aproximado (total - comunicação)
+append_csv_mpi() {
+  local dataset="$1" procs="$2" rep="$3"
+  local iters="$4" sse="$5" total_ms="$6" comm_ms="$7"
+  local comp_ms="NA"
+  if [[ "$total_ms" != "NA" && "$comm_ms" != "NA" ]]; then
+    comp_ms=$(awk -v t="$total_ms" -v c="$comm_ms" 'BEGIN{printf "%.3f", t-c}')
+  fi
+  echo "${dataset},mpi,${procs},NA,NA,NA,${rep},${iters},${sse},${total_ms},NA,${comm_ms},${comp_ms},NA,${total_ms}" >> "$OUTCSV"
+}
+
+append_csv_mpi_median() {
+  local dataset="$1" procs="$2" median_total="$3" median_comm="$4"
+  local median_comp="NA"
+  if [[ "$median_total" != "NA" && "$median_comm" != "NA" ]]; then
+    median_comp=$(awk -v t="$median_total" -v c="$median_comm" 'BEGIN{printf "%.3f", t-c}')
+  fi
+  echo "${dataset},mpi,${procs},NA,NA,NA,0,NA,NA,NA,${median_total},${median_comm},${median_comp},NA,${median_total}" >> "$OUTCSV"
 }
 
 # ===================== EXECUÇÃO =====================
@@ -317,6 +423,30 @@ if (( DO_CUDA )); then
       med_total=$(printf "%s\n" "${totals[@]}" | median)
       append_csv_cuda_median "$ds" "$block" "$med_total"
       echo "   [cuda ${ds}] block=${block} mediana total(ms)=${med_total}"
+    done
+  done
+fi
+
+# 4) MPI (opcional)
+if (( DO_MPI )); then
+  for ds in "${DATASETS[@]}"; do
+    dados="${DADOS_MAP[$ds]}"; centr="${CENTR_MAP[$ds]}"
+    echo "==> MPI: dataset=${ds} (strong scaling em P=${PROCS_STR})"
+    for P in "${PROCS[@]}"; do
+      echo "   [mpi ${ds}] P=${P}"
+      totals=()
+      comms=()
+      for rep in $(seq 1 "$REPS"); do
+        read iters sse total_ms comm_ms < <( run_one_mpi "$dados" "$centr" "$P" )
+        echo "      rep=${rep} iters=${iters} SSE=${sse} total_ms=${total_ms} comm_ms=${comm_ms}"
+        append_csv_mpi "$ds" "$P" "$rep" "$iters" "$sse" "$total_ms" "$comm_ms"
+        totals+=("$total_ms")
+        comms+=("$comm_ms")
+      done
+      med_total=$(printf "%s\n" "${totals[@]}" | median)
+      med_comm=$(printf "%s\n" "${comms[@]}" | median)
+      append_csv_mpi_median "$ds" "$P" "$med_total" "$med_comm"
+      echo "   [mpi ${ds}] P=${P} mediana total(ms)=${med_total}  mediana comm(ms)=${med_comm}  (baseline seq ms=${TEMPO_SERIAL_MS[$ds]})"
     done
   done
 fi
