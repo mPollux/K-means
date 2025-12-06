@@ -270,5 +270,6 @@ mpicc -O2 -std=c99 kmeans_1d_mpi.c -o kmeans_1d_mpi -lm
 ### Ambiente Python:
 
 ```
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
