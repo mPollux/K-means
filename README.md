@@ -170,12 +170,12 @@ O script unificado aceita flags:
 ### 🔸 Todas as versões (seq + omp + cuda + mpi)
 
 ```bash
-./run_bench.sh --all
+./run_bench.sh --omp --cuda --mpi
 ```
 
 ### 📌 Saída do script
 
-Gera arquivos no formato:
+Gera arquivos no formato (exemplos):
 
 ```
 resultados_omp_mpi_YYYYMMDD_HHMMSS.csv
@@ -232,9 +232,9 @@ figs_bench/
 │   ├── m_cuda_*.png
 │   └── g_cuda_*.png
 ├── mpi/
-│   ├── p_mpi_tempo_vs_procs.png
-│   ├── p_mpi_speedup_vs_procs.png
-│   └── p_mpi_breakdown_vs_procs.png
+│   ├── p_mpi_*.png
+│   ├── p_mpi_*.png
+│   └── p_mpi_*.png
 └── global/
     └── comparacao_seq_omp_cuda_mpi.csv
 ```
