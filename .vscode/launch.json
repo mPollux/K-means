@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": true,
-      "cwd": "c:/Users/gabri/Desktop/K-means/K-means/serial",
-      "program": "c:/Users/gabri/Desktop/K-means/K-means/serial/build/Debug/outDebug",
+      "cwd": "c:/Users/gabri/Desktop/K-means/K-means/1. openmp",
+      "program": "c:/Users/gabri/Desktop/K-means/K-means/1. openmp/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [
