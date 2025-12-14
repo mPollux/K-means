@@ -147,7 +147,6 @@ O script unificado aceita flags:
 * `--omp`
 * `--cuda`
 * `--mpi`
-* `--all`
 
 ### 🔸 Somente Sequencial + MPI
 
